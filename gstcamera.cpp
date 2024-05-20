@@ -1,67 +1,18 @@
-#include "gst/gst.h"
+#include <gstreamer-1.0/gst/gst.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
 #include <linux/videodev2.h>
+#include <gstreamer-1.0/gst/video/video.h>
 #include "v4l2-extra.h"
 #include <sys/ioctl.h>
 #include <dirent.h>
-
-static void trimCtrl(char *buf){
-        char *tail = buf+strlen(buf);
-        // trim trailing <CR> if needed
-        while ( tail > buf ) {
-                --tail ;
-                if ( iscntrl(*tail) ) {
-                        *tail = '\0' ;
-                }
-                else
-                        break;
-        }
-}
+#include <time.h>
 
 static int camera_fd = -1;
 
-static void find_camera_fd(void)
-{
-   if (0 > camera_fd) {
-      char fdDir[256];
-
-      char *fdEnd = fdDir+sprintf( fdDir, "/proc/%d/fd", getpid());
-      DIR *dir = opendir( fdDir );
-      if( dir )
-      {
-	 *fdEnd++ = '/';
-	 dirent  *dirEntry ;
-	 while( 0 != ( dirEntry = readdir( dir ) ) )
-	 {
-	    if( isdigit( dirEntry->d_name[0] ) )
-	    {
-	       char target[256];
-	       ssize_t bytes;
-	       strcpy(fdEnd,dirEntry->d_name);
-	       if (0 < (bytes=readlink(fdDir, target,sizeof(target)))) {
-		       int which;
-		       target[bytes] = 0;
-		       printf(" %s\n", target);
-		       if ((1 == sscanf(target,"/dev/video%d",&which))
-			   &&
-			   (16 > which)){
-			       camera_fd=strtoul(dirEntry->d_name,0,0);
-			       printf("    /dev/video%d == fd%d\n", which, camera_fd);
-		       }
-	       }
-	       else
-		       printf("not link\n");
-	    }
-	 }
-	 closedir( dir );
-      }
-   }
-}
-
-static void process_command(char *cmd)
+static void process_command(const char *cmd)
 {
 	if (0 == strcasecmp("af",cmd)) {
 		struct v4l2_control c;
@@ -83,6 +34,8 @@ static void process_command(char *cmd)
 	} else if (0 == strncasecmp("fd",cmd,2)) {
 		camera_fd = strtoul(cmd+2,0,0);
 		printf("camera_fd set to %d\n", camera_fd);
+	} else if (0 == strncasecmp("wt",cmd,2)) {
+		sleep(strtoul(cmd+2,0,0));
 	} else
                 printf("unknown command %s\n", cmd);
 }
@@ -91,18 +44,24 @@ int main (int argc, char const *const argv[])
 {
 	printf("Hello %s\n", argv[0]);
 	gst_init(NULL, NULL);
-	char pipeline_string[512] = {0};
-	for (int arg=1; arg < argc ; arg++) {
-		strcat(pipeline_string, argv[arg]);
-		strcat(pipeline_string, " ");
+	
+	const char *dev = getenv("CAM_DEVICE");
+	if (NULL == dev) {
+		printf("CAM_DEVICE not found in the environment, using default.\n");
+		dev = "/dev/video0";
 	}
+	printf("Video device: %s\n", dev);
 
-	pipeline_string[strlen(pipeline_string)-1] = 0;
+	char pipeline_string[1024];
+    snprintf(pipeline_string, sizeof(pipeline_string), "v4l2src device=%s ! videoconvert ! autovideosink sync=false ", dev);
+
+
 	printf("Pipeline string is: %s\n", pipeline_string);
 
 	// Create pipeline from configuration string
 	GstElement *pipeline = gst_parse_launch(pipeline_string, NULL);
 	printf( "pipeline == %p\n", pipeline);
+	GstElement *sink = gst_bin_get_by_name(GST_BIN(pipeline), "sink");
 
 	// Retrieve pipeline signal bus
 	GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
@@ -114,126 +73,10 @@ int main (int argc, char const *const argv[])
 	printf("pipeline is ready\n");
 	gst_element_set_state(pipeline, GST_STATE_PLAYING);
 
-	find_camera_fd();
 	char inbuf[80];
-	while (0 != fgets(inbuf,sizeof(inbuf),stdin)) {
-		trimCtrl(inbuf);
-		find_camera_fd();
-		process_command(inbuf);
+	char output[80];
+	for (int arg=1; arg < argc ; arg++) {
+		process_command(argv[arg]);
 	}
 	return 0 ;
 }
-
-#if 0
-/**
- * Create instance of GstPlayer for playing a video
- * @param play_unaccelerated	true if you should play with acceleration, false otherwise
- */
-GstPlayer::GstPlayer()
-{
-	mode = UNACCELERATED;
-	init_pipeline();
-}
-
-/**
- * Destroy instance of GstPlayer
- */
-GstPlayer::~GstPlayer()
-{
-}
-
-/**
- * Play video
- */
-void
-GstPlayer::play()
-{
-	gst_element_set_state(pipeline, GST_STATE_PLAYING);
-}
-
-/**
- * Pause video
- */
-void
-GstPlayer::pause()
-{
-	gst_element_set_state(pipeline, GST_STATE_PAUSED);
-}
-
-/**
- * Stop video
- */
-void
-GstPlayer::stop()
-{
-	destroy();
-	init_pipeline();
-}
-
-/**
- * Destroy this instance of GstPlayer by removing all references to components.
- * Necessary step in some cases before starting the stream after a STOP, so
- * this should be called whenever restarting the stream
- */
-void
-GstPlayer::destroy()
-{
-	gst_element_set_state(pipeline, GST_STATE_NULL);
-	gst_object_unref(pipeline);
-	gst_object_unref(bus);
-}
-
-/**
- * Provide reference to pipeline bus for monitoring pipe status
- * @return	reference to pipeline bus
- */
-GstBus*
-GstPlayer::get_bus()
-{
-	return bus;
-}
-
-
-/**
- * Initialize pipeline based on configuration file
- */
-void
-GstPlayer::init_pipeline()
-{
-	const int MAX_LENGTH = 500;
-	char pipeline_string[MAX_LENGTH];
-
-	// Retrieve pipeline configuration
-	if (mode == ACCELERATED)
-		get_config("pipeline_fast", pipeline_string);
-	else if (mode == UNACCELERATED)
-		get_config("pipeline", pipeline_string);
-	else
-		get_config("pipeline_camera", pipeline_string);
-
-	printf("Pipeline string is: %s\n", pipeline_string);
-
-	// Create pipeline from configuration string
-	pipeline = gst_parse_launch(pipeline_string, NULL);
-
-	// Retrieve pipeline signal bus
-	bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
-
-	// Set pipeline to ready
-	gst_element_set_state(pipeline, GST_STATE_READY);
-
-}
-
-/**
- * Set whether this video should play with acceleration or not
- * By default, this resets the pipeline, so do not call this midstream.
- * @param newMode	new mode of play, whether accelerated, nonaccelerated,
- * 	camera, or other
- */
-void
-GstPlayer::set_mode(unsigned int newMode)
-{
-	mode = newMode;
-	stop();
-}
-#endif
